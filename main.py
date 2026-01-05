@@ -1,61 +1,102 @@
-import streamlit as st
-from langchain_community.document_loaders import WebBaseLoader
 import os
+from io import BytesIO
+import streamlit as st
 import PyPDF2
-os.environ["USER_AGENT"] = "lavanya-ml-app/1.0"
+from langchain_community.document_loaders import WebBaseLoader
 
 from chain import Chain
-#from portfolio import Portfolio
 from utils import clean_text
-from io import StringIO
 
-def create_streamlit_app(llm,clean_text):
+# Good practice: set UA once (some sites block requests without it)
+os.environ["USER_AGENT"] = "lavanya-ml-app/1.0"
+
+def extract_text_from_upload(uploaded_file) -> str:
+    """Extract plain text from uploaded file (PDF or TXT)."""
+    if uploaded_file is None:
+        return ""
+
+    name = uploaded_file.name.lower()
+
+    # PDF
+    if name.endswith(".pdf"):
+        pdf_bytes = uploaded_file.getvalue()
+        reader = PyPDF2.PdfReader(BytesIO(pdf_bytes))
+        text = ""
+        for page in reader.pages:
+            text += (page.extract_text() or "") + "\n"
+        return text.strip()
+
+    # TXT fallback
+    return uploaded_file.getvalue().decode("utf-8", errors="ignore").strip()
+
+
+def create_streamlit_app(llm, clean_text_fn):
     st.title("Cold Mail Generator")
-    uploaded_file = st.file_uploader("Choose a file")
-      # add this import at top
 
-    if uploaded_file is not None:
-        # If it’s a PDF file, extract text
-        if uploaded_file.name.lower().endswith(".pdf"):
-            pdf_reader = PyPDF2.PdfReader(uploaded_file)
-            string_data = ""
-            for page in pdf_reader.pages:
-                string_data += page.extract_text() or ""
-        else:
-            # For txt/docx files, fallback
-            string_data = uploaded_file.getvalue().decode(errors="ignore")
+    # Restrict types to avoid accidental binary uploads
+    uploaded_file = st.file_uploader(
+        "Upload your resume (PDF or TXT)",
+        type=["pdf", "txt"]
+    )
 
-       # st.text_area("Resume Preview", string_data[:1500], height=250)
-    url_input=st.text_input("Enter URL:",value="https://www.amazon.jobs/en/jobs/3105047/agentic-ai-teacher-agi-data-services")
-    submit_button=st.button("Submit")
+    # Always define string_data (prevents NameError)
+    string_data = extract_text_from_upload(uploaded_file)
+
+    # Optional preview
+    if uploaded_file is not None and string_data:
+        with st.expander("Preview extracted resume text"):
+            st.text_area("Resume Text (preview)", string_data[:2000], height=250)
+
+    url_input = st.text_input(
+        "Enter job URL:",
+        value="https://www.amazon.jobs/en/jobs/3105047/agentic-ai-teacher-agi-data-services"
+    )
+
+    submit_button = st.button("Submit")
 
     if submit_button:
+        # Validate inputs early (better UX + fewer crashes)
+        if not url_input.strip():
+            st.error("Please enter a valid URL.")
+            return
+
+        if not string_data.strip():
+            st.error("Please upload a resume (PDF or TXT) before submitting.")
+            return
+
         try:
-            loader=WebBaseLoader([url_input])
-            data= clean_text(loader.load().pop().page_content)
+            with st.spinner("Loading job page..."):
+                loader = WebBaseLoader([url_input])
+                page = loader.load().pop()
+                data = clean_text_fn(page.page_content)
 
-            jobs=llm.extract_job(data)
+            with st.spinner("Extracting job details..."):
+                jobs = llm.extract_job(data)
 
-
+            # Normalize to list
             if isinstance(jobs, dict):
                 jobs = [jobs]
+            elif not isinstance(jobs, list):
+                jobs = []
+
+            if not jobs:
+                st.warning("No job roles were extracted from the URL content.")
+                return
 
             for i, job in enumerate(jobs, start=1):
                 st.subheader(f"Job {i}: {job.get('role', 'Unknown Role')}")
-                #st.write("**Skills:**", job.get('skills', []))
 
+                with st.spinner("Generating email..."):
+                    email = llm.write_email(job, string_data)
 
-
-                email = llm.write_email(job, string_data)
                 st.markdown("**Generated Email:**")
                 st.code(email or "⚠️ No email generated", language="markdown")
 
         except Exception as e:
-            st.error(e)
+            st.error(f"Error: {e}")
+
 
 if __name__ == "__main__":
-    chain=Chain()
-    #portfolio = Portfolio()
-    st.set_page_config(layout="wide",page_title="Cold Mail Generator")
-    create_streamlit_app(chain,clean_text)
-
+    st.set_page_config(layout="wide", page_title="Cold Mail Generator")
+    chain = Chain()
+    create_streamlit_app(chain, clean_text)
